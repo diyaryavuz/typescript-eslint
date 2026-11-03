@@ -214,6 +214,35 @@ export default createRule<Options, MessageId>({
   create(context, [{ checksConditionals, checksSpreads, checksVoidReturn }]) {
     const services = getParserServices(context);
     const checker = services.program.getTypeChecker();
+    const propertyKeyTypes = new Map<number | string, ts.Type>();
+
+    function getLiteralPropertyKeyType(value: number | string): ts.Type {
+      const cached = propertyKeyTypes.get(value);
+      if (cached) {
+        return cached;
+      }
+      // The literal-type factory APIs on TypeChecker are unavailable in TS 4.8.
+      // Parse a literal type instead; cache it for repeated property names.
+      const source = ts.createSourceFile(
+        'property-key.ts',
+        `type Key = ${JSON.stringify(value)};`,
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const declaration = source.statements[0] as ts.TypeAliasDeclaration;
+      const type = checker.getTypeFromTypeNode(declaration.type);
+      propertyKeyTypes.set(value, type);
+      return type;
+    }
+
+    function getTypeOfPropertyName(name: ts.PropertyName): ts.Type {
+      if (ts.isComputedPropertyName(name)) {
+        return checker.getTypeAtLocation(name.expression);
+      }
+      return getLiteralPropertyKeyType(
+        ts.isNumericLiteral(name) ? Number(name.text) : name.text,
+      );
+    }
 
     const checkedNodes = new Set<TSESTree.Node>();
 
@@ -597,7 +626,7 @@ export default createRule<Options, MessageId>({
         const propertyName = checker
           .getSymbolAtLocation(tsNode.name)
           ?.getName();
-        const keyType = getTypeOfPropertyName(checker, tsNode.name);
+        const keyType = getTypeOfPropertyName(tsNode.name);
         const contextualTypes = tsutils
           .unionConstituents(objType)
           .flatMap(type => {
@@ -791,7 +820,7 @@ export default createRule<Options, MessageId>({
             info =>
               isApplicableIndexKeyType(
                 checker,
-                getTypeOfPropertyName(checker, name),
+                getTypeOfPropertyName(name),
                 info.keyType,
               ) && isVoidReturningFunctionType(checker, nodeMember, info.type),
           )
@@ -831,7 +860,7 @@ export default createRule<Options, MessageId>({
                 ) ||
               type.getProperties().some(property => {
                 const declaration =
-                  property.valueDeclaration ?? property.declarations?.[0];
+                  property.valueDeclaration ?? property.getDeclarations()?.[0];
                 const name = ts.getNameOfDeclaration(declaration);
                 // Mapped properties (for example Record<'run', ...>) may not
                 // have declarations. Their symbol names still identify string keys.
@@ -840,9 +869,9 @@ export default createRule<Options, MessageId>({
                 const propertyKeyType =
                   name && ts.isPropertyName(name)
                     ? !ts.isPrivateIdentifier(name) &&
-                      getTypeOfPropertyName(checker, name)
+                      getTypeOfPropertyName(name)
                     : !String(property.escapedName).startsWith('__@') &&
-                      checker.getStringLiteralType(propertyName);
+                      getLiteralPropertyKeyType(propertyName);
                 return (
                   propertyKeyType &&
                   isApplicableIndexKeyType(checker, propertyKeyType, keyType) &&
@@ -1242,19 +1271,6 @@ function getMemberIfExists(
   return (
     symbolMemberMatch ?? tsutils.getPropertyOfType(type, escapedMemberName)
   );
-}
-
-function getTypeOfPropertyName(
-  checker: ts.TypeChecker,
-  name: ts.PropertyName,
-): ts.Type {
-  if (ts.isComputedPropertyName(name)) {
-    return checker.getTypeAtLocation(name.expression);
-  }
-  if (ts.isNumericLiteral(name)) {
-    return checker.getNumberLiteralType(Number(name.text));
-  }
-  return checker.getStringLiteralType(name.text);
 }
 
 /** Matches TypeScript's index applicability, including numeric property names. */
